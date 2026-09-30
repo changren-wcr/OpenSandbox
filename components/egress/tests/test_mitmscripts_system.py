@@ -99,6 +99,12 @@ class _Response:
 class _Flow:
     def __init__(self) -> None:
         self.request = _Request()
+        # Default to a well-formed HTTPS flow whose ClientHello SNI matches the
+        # request host: no-SNI HTTPS now fails closed before injection, so the
+        # fixture must model the SNI a real TLS client sends. peername is left
+        # out on purpose so _flow_client_ip still yields None (no dispatch key)
+        # exactly as before this field existed.
+        self.client_conn = types.SimpleNamespace(sni="code.example.com")
         self.response = _Response()
         self.metadata: dict[str, Any] = {}
         self.error = None
@@ -1075,6 +1081,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%2forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -1088,6 +1097,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%2Forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -1101,6 +1113,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%5corion-claude-plugin"
 
         system.requestheaders(flow)
@@ -1116,6 +1131,9 @@ class SystemAddonNpmScopedPackageTest(unittest.TestCase):
         flow = _Flow()
         flow.request.pretty_host = "registry.npmjs.org"
         flow.request.host = "registry.npmjs.org"
+        # Keep the ClientHello SNI consistent with the host: a mismatched (or
+        # missing) SNI on HTTPS is now rejected before credential injection.
+        flow.client_conn.sni = "registry.npmjs.org"
         flow.request.path = "/@ali%252forion-claude-plugin"
 
         system.requestheaders(flow)
@@ -1527,8 +1545,7 @@ class SystemAddonSniHostConsistencyTest(unittest.TestCase):
     def test_absent_sni_falls_back_to_host_header(self) -> None:
         """Plaintext HTTP carries no SNI; there is no endpoint identity to
         verify, so the binding decision stays as-is (egress allow rules remain
-        the only control). No-SNI TLS never reaches here - tls_clienthello
-        passes it through."""
+        the only control)."""
         system = self._make_system_with_vault()
         system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
             1,
@@ -1553,6 +1570,36 @@ class SystemAddonSniHostConsistencyTest(unittest.TestCase):
         system.requestheaders(flow)
 
         self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+
+    def test_absent_sni_on_https_is_rejected(self) -> None:
+        """With ssl_insecure enabled, tls_clienthello keeps no-SNI TLS under
+        MITM, so such flows do reach requestheaders. A TLS session without SNI
+        has no endpoint identity, so a spoofed Host header must not unlock the
+        credential: fail closed rather than fall back to the Host header."""
+        system = self._make_system_with_vault()
+        # _Flow defaults to scheme="https" / port 443, i.e. a TLS request.
+        flow = self._with_sni(_Flow(), None)
+
+        system.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
+        self.assertTrue(
+            any("endpoint identity" in message for message in system.ctx.log.messages)
+        )
+
+    def test_absent_sni_on_streamed_https_is_killed(self) -> None:
+        """Same fail-closed rule for large/chunked bodies, where a 403 cannot
+        be served and the flow is killed instead."""
+        system = self._make_system_with_vault()
+        flow = self._with_sni(_Flow(), None)
+        flow.request.stream = True
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.killed)
+        self.assertNotIn("Private-Token", flow.request.headers._values)
 
     def test_streamed_request_with_foreign_sni_is_killed_not_403(self) -> None:
         """mitmproxy cannot serve a 403 once a large body is streaming, so the

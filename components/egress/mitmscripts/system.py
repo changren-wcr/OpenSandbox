@@ -443,13 +443,20 @@ def _sni_outside_binding_scope(flow: http.HTTPFlow, binding: dict[str, Any]) -> 
     the injection decision to an identity the peer had to prove with a
     certificate.
 
-    Returns False when no SNI is available: plaintext HTTP carries none, and
-    no-SNI TLS never reaches this hook because :func:`tls_clienthello` passes it
-    through. For those flows the egress allow rules stay the only control.
+    When no SNI is available the outcome depends on the scheme. Plaintext HTTP
+    carries no SNI by design, so it returns False and the egress allow rules
+    stay the only control. No-SNI HTTPS, however, still reaches this hook when
+    ``ssl_insecure`` is enabled (:func:`tls_clienthello` only passes it through
+    otherwise); such a session has no endpoint identity at all, so it is
+    treated as outside every scope (fail closed) instead of falling back to the
+    spoofable Host header.
     """
     sni = _flow_sni(flow)
     if sni is None:
-        return False
+        # Fail closed for TLS without SNI: in transparent mode mitmproxy sets
+        # the request scheme to "https" exactly when the client connection is
+        # TLS, and that is the same field binding matching already keys on.
+        return (flow.request.scheme or "").lower() == "https"
     patterns = (binding.get("match") or {}).get("hosts") or []
     return not any(_host_matches(sni, pattern)[0] for pattern in patterns)
 
