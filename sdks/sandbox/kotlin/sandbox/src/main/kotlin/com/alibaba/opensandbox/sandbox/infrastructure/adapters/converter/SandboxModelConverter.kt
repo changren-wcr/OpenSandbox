@@ -150,8 +150,13 @@ internal object SandboxModelConverter {
                 ApiNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
         val builder = NetworkRule.builder().action(action)
-        this.target?.let { builder.target(it) }
-        this.ports?.let { builder.ports(it) }
+        // Response parsing must not be stricter than the server: the sidecar
+        // marshals `target` without omitempty, so a port-only rule comes back
+        // as `"target": ""`, and the server tolerates/omits empty port lists.
+        // Treat blank target and empty ports as unset instead of letting the
+        // strict builder throw on read-back.
+        this.target?.takeIf { it.isNotBlank() }?.let { builder.target(it) }
+        this.ports?.takeIf { it.isNotEmpty() }?.let { builder.ports(it) }
         return builder.build()
     }
 
@@ -175,8 +180,13 @@ internal object SandboxModelConverter {
                 ApiEgressNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
         val builder = NetworkRule.builder().action(action)
-        this.target?.let { builder.target(it) }
-        this.ports?.let { builder.ports(it) }
+        // Response parsing must not be stricter than the server: the sidecar
+        // marshals `target` without omitempty, so a port-only rule comes back
+        // as `"target": ""`, and the server tolerates/omits empty port lists.
+        // Treat blank target and empty ports as unset instead of letting the
+        // strict builder throw on read-back.
+        this.target?.takeIf { it.isNotBlank() }?.let { builder.target(it) }
+        this.ports?.takeIf { it.isNotEmpty() }?.let { builder.ports(it) }
         return builder.build()
     }
 

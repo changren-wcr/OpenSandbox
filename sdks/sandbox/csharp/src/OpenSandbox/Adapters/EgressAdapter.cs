@@ -24,6 +24,9 @@ namespace OpenSandbox.Adapters;
 
 internal sealed class EgressAdapter : IEgress, ICredentialVault
 {
+    // Same per-rule cap as the sidecar (policy.go maxPortsPerRule) and server.
+    private const int MaxPortsPerRule = 256;
+
     private readonly HttpClientWrapper _client;
 
     public EgressAdapter(HttpClientWrapper client)
@@ -132,6 +135,7 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         // wire shape the sidecar/other SDKs produce for a port-only rule.
         var normalizedRules = rules.Select(r =>
         {
+            ValidateNetworkRule(r);
             var normalized = new Dictionary<string, object?>
             {
                 ["action"] = r.Action == NetworkRuleAction.Allow ? "allow" : "deny",
@@ -140,7 +144,7 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
             {
                 normalized["target"] = r.Target;
             }
-            if (r.Ports is { Count: > 0 })
+            if (r.Ports is not null)
             {
                 normalized["ports"] = r.Ports;
             }
@@ -155,6 +159,45 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         CancellationToken cancellationToken = default)
     {
         await _client.DeleteAsync("/policy", targets.ToList(), cancellationToken).ConfigureAwait(false);
+    }
+
+    // Mirrors the server/sidecar checks so an invalid rule fails at the call
+    // site with InvalidArgumentException instead of as a remote 400, matching
+    // the client-side validation the Kotlin and Python SDKs already perform.
+    private static void ValidateNetworkRule(NetworkRule rule)
+    {
+        // With Target optional, a rule with neither field is easy to build by mistake.
+        if (rule.Target is null && rule.Ports is not { Count: > 0 })
+        {
+            throw new InvalidArgumentException("NetworkRule requires target, ports, or both.");
+        }
+        if (rule.Ports is null)
+        {
+            return;
+        }
+        // An explicitly empty Ports list used to be dropped silently, which
+        // widened the rule to every port of the target. Reject it instead
+        // (the spec declares `minItems: 1`).
+        if (rule.Ports.Count == 0)
+        {
+            throw new InvalidArgumentException("NetworkRule ports cannot be empty; omit it (null) instead.");
+        }
+        if (rule.Ports.Count > MaxPortsPerRule)
+        {
+            throw new InvalidArgumentException($"NetworkRule ports cannot exceed {MaxPortsPerRule} entries.");
+        }
+        var seen = new HashSet<int>();
+        foreach (var port in rule.Ports)
+        {
+            if (port < 1 || port > 65535)
+            {
+                throw new InvalidArgumentException($"NetworkRule port {port} out of range 1-65535.");
+            }
+            if (!seen.Add(port))
+            {
+                throw new InvalidArgumentException($"NetworkRule has duplicate port {port}.");
+            }
+        }
     }
 
     private static NetworkPolicy ParseNetworkPolicy(JsonElement element)
@@ -180,20 +223,39 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
     {
         var actionText = element.GetProperty("action").GetString();
 
-        // target is absent (not merely empty) for a port-only rule; GetProperty
-        // would throw KeyNotFoundException in that case, so use TryGetProperty.
+        // The sidecar marshals target without omitempty, so a port-only rule
+        // arrives as `"target": ""`; other producers may omit the key entirely.
+        // Normalize both (and whitespace-only) to null so Target consistently
+        // means "no target" for port-only rules.
         string? target = null;
         if (element.TryGetProperty("target", out var targetElement) &&
             targetElement.ValueKind == JsonValueKind.String)
         {
-            target = targetElement.GetString();
+            var targetText = targetElement.GetString();
+            target = string.IsNullOrWhiteSpace(targetText) ? null : targetText;
         }
 
         List<int>? ports = null;
         if (element.TryGetProperty("ports", out var portsElement) &&
             portsElement.ValueKind == JsonValueKind.Array)
         {
-            ports = portsElement.EnumerateArray().Select(p => p.GetInt32()).ToList();
+            // TryGetInt32 instead of GetInt32: a string, fractional or null
+            // element would otherwise escape as a raw System.Text.Json
+            // exception rather than the SDK's own API exception.
+            ports = new List<int>();
+            foreach (var portElement in portsElement.EnumerateArray())
+            {
+                if (portElement.ValueKind != JsonValueKind.Number || !portElement.TryGetInt32(out var port))
+                {
+                    throw new SandboxApiException($"Invalid network rule port: {portElement.GetRawText()}");
+                }
+                ports.Add(port);
+            }
+            // An empty list carries no port scope; treat it like an absent key.
+            if (ports.Count == 0)
+            {
+                ports = null;
+            }
         }
 
         return new NetworkRule

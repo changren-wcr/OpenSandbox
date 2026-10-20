@@ -50,7 +50,11 @@ export type ResourceLimits = Record<string, string>;
 
 export type NetworkRuleAction = "allow" | "deny";
 
-export interface NetworkRule extends Record<string, unknown> {
+/**
+ * Fields shared by every egress rule. Use {@link NetworkRule}, which also
+ * encodes that at least one of `target` / `ports` must be set.
+ */
+export interface NetworkRuleFields extends Record<string, unknown> {
   /**
    * Whether to allow or deny matching targets.
    */
@@ -72,6 +76,15 @@ export interface NetworkRule extends Record<string, unknown> {
    */
   ports?: number[];
 }
+
+/**
+ * Egress rule. This model is hand-written (unlike `api/*.ts`, where the
+ * OpenAPI generator cannot express `anyOf`), so the "target, ports, or both"
+ * invariant is encoded as a union: `{ action: "allow" }` alone is now a
+ * compile-time error instead of a server 400.
+ */
+export type NetworkRule = NetworkRuleFields &
+  ({ target: string } | { ports: number[] });
 
 export interface NetworkPolicy extends Record<string, unknown> {
   /**

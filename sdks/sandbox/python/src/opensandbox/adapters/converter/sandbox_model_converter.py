@@ -253,11 +253,14 @@ class SandboxModelConverter:
                 api_egress = [
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        # rule.target/.ports use None/empty for "unset"; the generated
+                        # rule.target/.ports use None for "unset"; the generated
                         # client instead uses its own UNSET sentinel to omit a field
                         # from the JSON body entirely.
                         target=rule.target if rule.target is not None else UNSET,
-                        ports=rule.ports if rule.ports else UNSET,
+                        # `is not None`, not truthiness: an empty list must never be
+                        # silently dropped (that would widen the rule to all ports);
+                        # the domain model already rejects `[]`.
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in network_policy.egress
                 ]
@@ -392,10 +395,37 @@ class SandboxModelConverter:
             ApiNetworkRule(
                 action=NetworkRuleAction(rule.action),
                 target=rule.target if rule.target is not None else UNSET,
-                ports=rule.ports if rule.ports else UNSET,
+                # `is not None`, not truthiness: an empty list must never be
+                # silently dropped (that would widen the rule to all ports);
+                # the domain model already rejects `[]`.
+                ports=rule.ports if rule.ports is not None else UNSET,
             )
             for rule in rules
         ]
+
+    @staticmethod
+    def to_egress_network_policy(raw: dict) -> NetworkPolicy:
+        """Convert an egress sidecar GET /policy payload (``to_dict()`` of the
+        generated model) to the domain NetworkPolicy.
+
+        The sidecar marshals ``target`` without omitempty, so a port-only rule
+        arrives as ``"target": ""``. Drop blank targets and empty port lists
+        before validation so the strict domain model can read back every rule
+        the sidecar accepted.
+        """
+        egress = raw.get("egress")
+        if isinstance(egress, list):
+            normalized = []
+            for rule in egress:
+                rule = dict(rule)
+                target = rule.get("target")
+                if isinstance(target, str) and not target.strip():
+                    rule.pop("target")
+                if rule.get("ports") == []:
+                    rule.pop("ports")
+                normalized.append(rule)
+            raw = {**raw, "egress": normalized}
+        return NetworkPolicy.model_validate(raw)
 
     @staticmethod
     def to_sandbox_network_policy(api_policy):
@@ -425,8 +455,13 @@ class SandboxModelConverter:
                     ),
                     # The generated model's UNSET sentinel means "field absent
                     # from the JSON body"; the domain model spells that as None.
-                    target=rule.target if not isinstance(rule.target, Unset) else None,
-                    ports=rule.ports if not isinstance(rule.ports, Unset) else None,
+                    # Read-back must not be stricter than the server: a blank
+                    # target (port-only rule) or an empty ports list is "unset",
+                    # not an error the strict domain validators should raise on.
+                    target=rule.target
+                    if not isinstance(rule.target, Unset) and rule.target.strip()
+                    else None,
+                    ports=rule.ports if not isinstance(rule.ports, Unset) and rule.ports else None,
                 )
                 for rule in api_policy.egress
             ]

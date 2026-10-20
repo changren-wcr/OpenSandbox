@@ -19,6 +19,7 @@ Sandbox-related data models.
 Models for sandbox creation, configuration, status, and lifecycle management.
 """
 
+import ipaddress
 import re
 from datetime import datetime
 from typing import Literal
@@ -110,6 +111,31 @@ class PlatformSpec(BaseModel):
     )
 
 
+_MAX_PORTS_PER_RULE = 256
+
+
+def _is_ip_or_cidr(value: str) -> bool:
+    """Mirror the egress sidecar's (policy.go) target classification: IP, or
+    "<addr>/<decimal bits>" CIDR as accepted by Go's netip.ParsePrefix.
+    Anything else (including netmask notation) is treated as a domain."""
+    value = value.strip()
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    _, sep, bits = value.partition("/")
+    if not sep or not bits.isascii() or not bits.isdigit():
+        return False
+    if len(bits) > 1 and bits[0] == "0":
+        return False
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 class NetworkRule(BaseModel):
     """
     Egress rule for matching network targets.
@@ -127,7 +153,11 @@ class NetworkRule(BaseModel):
     )
     ports: list[int] | None = Field(
         default=None,
-        max_length=256,
+        # min_length=1 matches the spec's `minItems: 1`: an explicit `[]` used
+        # to be accepted here and then silently dropped by the converters,
+        # turning a port-scoped rule into one that matches every port.
+        min_length=1,
+        max_length=_MAX_PORTS_PER_RULE,
         description=(
             "Restricts this rule to specific TCP destination ports (1-65535). Omitted target "
             "with ports set applies to all destinations; a domain target with ports is "
@@ -142,10 +172,31 @@ class NetworkRule(BaseModel):
             raise ValueError("Network rule target cannot be blank")
         return v
 
+    @field_validator("ports")
+    @classmethod
+    def ports_must_be_valid(cls, v: list[int] | None) -> list[int] | None:
+        # Mirror the server/sidecar checks (range + duplicates) so callers get
+        # a local ValidationError instead of a remote 4xx.
+        if v is None:
+            return v
+        seen: set[int] = set()
+        for port in v:
+            if port < 1 or port > 65535:
+                raise ValueError(f"Network rule port {port} out of range 1-65535")
+            if port in seen:
+                raise ValueError(f"Network rule has duplicate port {port}")
+            seen.add(port)
+        return v
+
     @model_validator(mode="after")
     def target_or_ports_required(self) -> "NetworkRule":
         if self.target is None and not self.ports:
             raise ValueError("Network rule requires target, ports, or both")
+        # Domain rules are evaluated at the DNS layer, which has no port
+        # dimension; the server and sidecar reject this combination, so fail
+        # locally with the same message.
+        if self.target is not None and self.ports and not _is_ip_or_cidr(self.target):
+            raise ValueError("Network rule ports are not supported for domain targets yet")
         return self
 
 

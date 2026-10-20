@@ -309,7 +309,11 @@ class NetworkRule private constructor(
             for (port in ports) {
                 require(port in 1..65535) { "Port $port out of range 1-65535" }
             }
-            this.ports = ports
+            // Defensive copy: storing the caller's list by reference would let a
+            // MutableList be mutated after validation, so the checks above (and
+            // the immutability the private constructor implies) would no longer
+            // describe the built rule.
+            this.ports = ports.toList()
             return this
         }
 

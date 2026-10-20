@@ -142,7 +142,12 @@ type NetworkPolicy struct {
 type NetworkRule struct {
 	Action string `json:"action"`
 	Target string `json:"target,omitempty"`
-	Ports  []int  `json:"ports,omitempty"`
+	// Ports restricts the rule to TCP destination ports. The Go SDK does no
+	// client-side validation, so these server/sidecar limits are the only
+	// contract a caller sees before a 4xx: each port must be 1-65535, at most
+	// 256 ports per rule, no duplicates, and Target (if set) must be an IP or
+	// CIDR.
+	Ports []int `json:"ports,omitempty"`
 }
 
 // CredentialProxyConfig enables Credential Vault transparent proxy support at

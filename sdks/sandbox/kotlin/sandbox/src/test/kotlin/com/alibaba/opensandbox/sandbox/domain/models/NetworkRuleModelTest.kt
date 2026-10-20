@@ -112,4 +112,22 @@ class NetworkRuleModelTest {
 
         assertEquals(256, rule.ports?.size)
     }
+
+    @Test
+    fun `builder copies the ports list so later caller mutation cannot bypass validation`() {
+        // Regression: the builder used to keep the caller's list by reference.
+        val ports = mutableListOf(22, 80)
+        val rule =
+            NetworkRule
+                .builder()
+                .action(NetworkRule.Action.ALLOW)
+                .target("10.0.0.5")
+                .ports(ports)
+                .build()
+
+        ports.add(22)
+        ports.add(0)
+
+        assertEquals(listOf(22, 80), rule.ports)
+    }
 }

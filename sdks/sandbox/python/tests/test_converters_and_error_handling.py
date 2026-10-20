@@ -659,6 +659,97 @@ def test_network_rule_rejects_more_than_256_ports() -> None:
         NetworkRule(action="allow", ports=list(range(1, 258)))
 
 
+# Review follow-ups: local validation mirrors the server/sidecar, and the read
+# path tolerates the wire shapes the sidecar actually produces.
+
+
+@pytest.mark.parametrize("bad_port", [0, -1, 65536])
+def test_network_rule_rejects_out_of_range_ports(bad_port: int) -> None:
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", target="10.0.0.0/8", ports=[bad_port])
+
+
+def test_network_rule_rejects_duplicate_ports() -> None:
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", ports=[443, 443])
+
+
+def test_network_rule_rejects_empty_ports_list() -> None:
+    # `[]` used to be accepted and then dropped by the converter, widening the
+    # rule to every port of the target.
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", target="10.0.0.5", ports=[])
+
+
+@pytest.mark.parametrize(
+    "target", ["example.com", "*.example.com", "10.0.0.0/255.0.0.0"]
+)
+def test_network_rule_rejects_domain_target_with_ports(target: str) -> None:
+    # Netmask notation is rejected by Go's netip.ParsePrefix, so the sidecar
+    # treats it as a domain too.
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", target=target, ports=[443])
+
+
+@pytest.mark.parametrize("target", ["10.0.0.5", "10.0.0.0/8", "2001:db8::/32"])
+def test_network_rule_accepts_ip_or_cidr_target_with_ports(target: str) -> None:
+    assert NetworkRule(action="allow", target=target, ports=[443]).ports == [443]
+
+
+def test_converter_does_not_drop_explicit_ports() -> None:
+    # `is not None` instead of truthiness when building the API model.
+    rules = SandboxModelConverter.to_api_network_rules(
+        [NetworkRule(action="deny", target="10.0.0.5", ports=[22])]
+    )
+    assert rules[0].to_dict() == {"action": "deny", "target": "10.0.0.5", "ports": [22]}
+
+
+def test_egress_policy_read_back_accepts_sidecar_port_only_wire_shape() -> None:
+    # Regression: the sidecar returns `"target": ""` for port-only rules (no
+    # omitempty in policy.go); the strict domain validator used to reject it,
+    # so get_policy() could not read the very rules this SDK can write.
+    from opensandbox.api.egress.models.network_policy import (
+        NetworkPolicy as ApiEgressNetworkPolicy,
+    )
+
+    api_policy = ApiEgressNetworkPolicy.from_dict(
+        {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "deny", "target": "", "ports": [25]},
+                {"action": "allow", "target": "pypi.org"},
+            ],
+        }
+    )
+    policy = SandboxModelConverter.to_egress_network_policy(api_policy.to_dict())
+    assert policy.egress is not None
+    assert policy.egress[0].target is None
+    assert policy.egress[0].ports == [25]
+    assert policy.egress[1].target == "pypi.org"
+
+
+def test_lifecycle_policy_read_back_tolerates_blank_target_and_empty_ports() -> None:
+    from opensandbox.api.lifecycle.models.network_policy import (
+        NetworkPolicy as ApiNetworkPolicy,
+    )
+
+    api_policy = ApiNetworkPolicy.from_dict(
+        {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "deny", "target": "", "ports": [25]},
+                {"action": "allow", "target": "10.0.0.5", "ports": []},
+            ],
+        }
+    )
+    policy = SandboxModelConverter.to_sandbox_network_policy(api_policy)
+    assert policy.egress is not None
+    assert policy.egress[0].target is None
+    assert policy.egress[0].ports == [25]
+    assert policy.egress[1].target == "10.0.0.5"
+    assert policy.egress[1].ports is None
+
+
 def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
     req = SandboxModelConverter.to_api_create_sandbox_request(
         spec=SandboxImageSpec("python:3.11"),

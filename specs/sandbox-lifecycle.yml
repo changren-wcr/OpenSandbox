@@ -1683,6 +1683,12 @@ components:
         ports:
           type: array
           minItems: 1
+          # maxItems mirrors the server/sidecar cap (policy.go maxPortsPerRule) so
+          # generated clients agree with what the server accepts. Duplicate ports
+          # are also rejected server-side, but `uniqueItems: true` is deliberately
+          # not set: the Kotlin generator maps it to Set<Int>, changing the
+          # generated public type (and silently de-duplicating on the client).
+          maxItems: 256
           items:
             type: integer
             minimum: 1

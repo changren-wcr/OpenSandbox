@@ -933,3 +933,42 @@ class TestNetworkRule:
         )
         dumped = policy.model_dump(by_alias=True, exclude_none=True)
         assert dumped["egress"] == [{"action": "deny", "ports": [25]}]
+
+    # Review follow-ups: keep the server's accepted set aligned with the
+    # sidecar's (policy.go normalizePolicy) so no rule passes here and then
+    # fails at egress sidecar startup.
+
+    def test_rejects_empty_ports_list(self):
+        # Both specs declare `minItems: 1`; `[]` used to be accepted and
+        # silently treated as "not port-scoped".
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.5", "ports": []})
+
+    def test_rejects_netmask_notation_cidr_with_ports(self):
+        # Go's netip.ParsePrefix rejects netmask notation, so the sidecar
+        # would treat this target as a domain and reject the rule.
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/255.0.0.0", "ports": [22]})
+
+    def test_rejects_leading_zero_prefix_bits_with_ports(self):
+        # netip.ParsePrefix also rejects leading zeros in the bit count.
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/08", "ports": [22]})
+
+    def test_accepts_ipv6_cidr_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "2001:db8::/32", "ports": [443]})
+        assert rule.target == "2001:db8::/32"
+
+    def test_whitespace_only_target_without_ports_is_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "   "})
+
+    def test_whitespace_only_target_with_ports_becomes_port_only(self):
+        # Mirrors the sidecar: TrimSpace("   ") == "" with ports => port-only rule.
+        rule = NetworkRule.model_validate({"action": "deny", "target": "   ", "ports": [25]})
+        assert rule.target is None
+        assert rule.model_dump(exclude_none=True) == {"action": "deny", "ports": [25]}
+
+    def test_padded_ip_target_is_trimmed_and_classified_as_ip(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": " 10.0.0.5 ", "ports": [22]})
+        assert rule.target == "10.0.0.5"

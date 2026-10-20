@@ -36,6 +36,17 @@ def _is_ip_or_cidr(value: str) -> bool:
         return True
     except ValueError:
         pass
+    # Only delegate to ip_network for "<addr>/<decimal bits>": Python's
+    # ip_network also accepts netmask notation ("10.0.0.0/255.0.0.0") and
+    # leading-zero bits ("10.0.0.0/08"), but Go's netip.ParsePrefix rejects
+    # both, so the sidecar would classify such a target as a domain and fail
+    # at provisioning time ("ports are not supported for domain targets").
+    # Restricting the accepted set here keeps both layers in agreement.
+    addr, sep, bits = value.partition("/")
+    if not sep or not bits.isascii() or not bits.isdigit():
+        return False
+    if len(bits) > 1 and bits[0] == "0":
+        return False
     try:
         ipaddress.ip_network(value, strict=False)
         return True
@@ -118,6 +129,10 @@ class NetworkRule(BaseModel):
     )
     ports: Optional[List[int]] = Field(
         None,
+        # min_length=1 matches the published `minItems: 1` in both specs:
+        # previously `[]` was accepted and silently treated as "not
+        # port-scoped" downstream, violating the documented contract.
+        min_length=1,
         max_length=256,
         description=(
             "Restricts this rule to specific TCP destination ports (1-65535). Omitted target with "
@@ -125,6 +140,18 @@ class NetworkRule(BaseModel):
             "only, max 256 ports per rule."
         ),
     )
+
+    @field_validator("target")
+    @classmethod
+    def strip_target(cls, target: Optional[str]) -> Optional[str]:
+        # policy.go runs strings.TrimSpace on the target before classifying
+        # it, so mirror that here: " " becomes unset (and is then rejected
+        # below unless ports are set, exactly like the sidecar), and
+        # " 10.0.0.5" is classified as an IP instead of a domain. The
+        # stripped value is what gets forwarded to the sidecar.
+        if target is None:
+            return None
+        return target.strip() or None
 
     @field_validator("ports")
     @classmethod

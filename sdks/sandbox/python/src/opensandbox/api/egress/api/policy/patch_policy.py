@@ -97,7 +97,13 @@ def sync_detailed(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - Rules are matched by merge key: the `target` (domains compared
+      case-insensitively) plus, for port-scoped rules, the sorted `ports`
+      list. If multiple incoming rules share a merge key, the first one wins.
+    - Rules with the same `target` but different `ports` (including a
+      portless rule vs. a port-scoped one) have different merge keys, so an
+      incoming rule only replaces an existing rule with the same key; the
+      others coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -133,7 +139,13 @@ def sync(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - Rules are matched by merge key: the `target` (domains compared
+      case-insensitively) plus, for port-scoped rules, the sorted `ports`
+      list. If multiple incoming rules share a merge key, the first one wins.
+    - Rules with the same `target` but different `ports` (including a
+      portless rule vs. a port-scoped one) have different merge keys, so an
+      incoming rule only replaces an existing rule with the same key; the
+      others coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -164,7 +176,13 @@ async def asyncio_detailed(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - Rules are matched by merge key: the `target` (domains compared
+      case-insensitively) plus, for port-scoped rules, the sorted `ports`
+      list. If multiple incoming rules share a merge key, the first one wins.
+    - Rules with the same `target` but different `ports` (including a
+      portless rule vs. a port-scoped one) have different merge keys, so an
+      incoming rule only replaces an existing rule with the same key; the
+      others coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -198,7 +216,13 @@ async def asyncio(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - Rules are matched by merge key: the `target` (domains compared
+      case-insensitively) plus, for port-scoped rules, the sorted `ports`
+      list. If multiple incoming rules share a merge key, the first one wins.
+    - Rules with the same `target` but different `ports` (including a
+      portless rule vs. a port-scoped one) have different merge keys, so an
+      incoming rule only replaces an existing rule with the same key; the
+      others coexist.
 
     Args:
         body (list[NetworkRule]):

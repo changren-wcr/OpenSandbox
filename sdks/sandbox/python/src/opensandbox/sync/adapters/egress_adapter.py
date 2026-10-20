@@ -27,6 +27,9 @@ from opensandbox.adapters.converter.response_handler import (
     handle_api_error,
     require_parsed,
 )
+from opensandbox.adapters.converter.sandbox_model_converter import (
+    SandboxModelConverter,
+)
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.sandboxes import (
     Credential,
@@ -311,7 +314,9 @@ class EgressAdapterSync(EgressSync):
                 raise ValueError("Egress policy response missing policy payload")
             if not isinstance(policy, ApiNetworkPolicy):
                 raise TypeError(f"Expected NetworkPolicy, got {type(policy).__name__}")
-            return NetworkPolicy.model_validate(policy.to_dict())
+            # Normalize the sidecar's wire shape (blank target on port-only
+            # rules) before strict domain validation; see the converter.
+            return SandboxModelConverter.to_egress_network_policy(policy.to_dict())
         except Exception as e:
             logger.error(
                 f"Failed to get egress policy from endpoint {self.endpoint.endpoint}",
@@ -339,7 +344,10 @@ class EgressAdapterSync(EgressSync):
                         # the generated client instead uses its own UNSET sentinel
                         # to mean "field omitted from the JSON body".
                         target=rule.target if rule.target is not None else UNSET,
-                        ports=rule.ports if rule.ports else UNSET,
+                        # `is not None`, not truthiness: an empty list must never be
+                        # silently dropped (that would widen the rule to all ports);
+                        # the domain model already rejects `[]`.
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in rules
                 ],

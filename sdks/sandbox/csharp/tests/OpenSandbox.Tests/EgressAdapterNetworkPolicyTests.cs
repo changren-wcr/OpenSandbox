@@ -16,6 +16,7 @@ using System.Net;
 using System.Text;
 using FluentAssertions;
 using OpenSandbox.Adapters;
+using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
 using Xunit;
@@ -23,11 +24,11 @@ using Xunit;
 namespace OpenSandbox.Tests;
 
 /// <summary>
-/// Regression coverage for a port-scoped egress rule (no `target` in the wire
-/// JSON): GetPropertyAsync used to call JsonElement.GetProperty("target"),
-/// which throws when the property is absent instead of merely empty. A
-/// port-only rule written by another language's SDK would crash this one on
-/// read.
+/// Regression coverage for port-scoped egress rules. The real sidecar always
+/// emits `"target": ""` for a port-only rule (Go's EgressRule.Target has no
+/// omitempty); before the fix that parsed as Target = "" and the ports were
+/// dropped. Absent `target` is covered too, for producers that omit it. Also
+/// covers client-side validation on PatchRulesAsync and malformed port data.
 /// </summary>
 public class EgressAdapterNetworkPolicyTests
 {
@@ -106,6 +107,151 @@ public class EgressAdapterNetworkPolicyTests
         var body = handler.Requests[0].Body;
         body.Should().Contain("\"target\":\"example.com\"");
         body.Should().NotContain("\"ports\"");
+    }
+
+    [Fact]
+    public async Task GetPolicyAsync_ShouldParseSidecarWireShape_EmptyTargetAsNull()
+    {
+        // Exact shape the sidecar produces for a port-only rule.
+        var handler = new CaptureHandler(_ => """
+        {
+          "status": "ok",
+          "policy": {
+            "defaultAction": "deny",
+            "egress": [
+              { "action": "deny", "target": "", "ports": [25] }
+            ]
+          }
+        }
+        """);
+        var adapter = CreateAdapter(handler);
+
+        var policy = await adapter.GetPolicyAsync();
+
+        policy.Egress.Should().ContainSingle();
+        policy.Egress![0].Target.Should().BeNull();
+        policy.Egress[0].Ports.Should().Equal(25);
+    }
+
+    [Fact]
+    public async Task GetPolicyAsync_ShouldTreatEmptyPortsAsUnset()
+    {
+        var handler = new CaptureHandler(_ => """
+        {
+          "status": "ok",
+          "policy": {
+            "defaultAction": "deny",
+            "egress": [
+              { "action": "allow", "target": "10.0.0.5", "ports": [] }
+            ]
+          }
+        }
+        """);
+        var adapter = CreateAdapter(handler);
+
+        var policy = await adapter.GetPolicyAsync();
+
+        policy.Egress![0].Target.Should().Be("10.0.0.5");
+        policy.Egress[0].Ports.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("\"443\"")]
+    [InlineData("443.5")]
+    [InlineData("null")]
+    public async Task GetPolicyAsync_ShouldThrowSandboxApiException_ForMalformedPort(string portJson)
+    {
+        var handler = new CaptureHandler(_ => $$"""
+        {
+          "status": "ok",
+          "policy": {
+            "defaultAction": "deny",
+            "egress": [
+              { "action": "deny", "ports": [{{portJson}}] }
+            ]
+          }
+        }
+        """);
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetPolicyAsync();
+
+        await act.Should().ThrowAsync<SandboxApiException>();
+    }
+
+    [Fact]
+    public async Task PatchRulesAsync_ShouldRejectRuleWithNeitherTargetNorPorts()
+    {
+        var handler = new CaptureHandler(_ => """{ "status": "ok" }""");
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Allow }
+        ]);
+
+        await act.Should().ThrowAsync<InvalidArgumentException>();
+        handler.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PatchRulesAsync_ShouldRejectEmptyPorts_InsteadOfDroppingThem()
+    {
+        // Regression: `Ports = []` used to vanish from the wire, so the rule
+        // silently applied to every port of the target.
+        var handler = new CaptureHandler(_ => """{ "status": "ok" }""");
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Allow, Target = "10.0.0.5", Ports = [] }
+        ]);
+
+        await act.Should().ThrowAsync<InvalidArgumentException>();
+        handler.Requests.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(65536)]
+    public async Task PatchRulesAsync_ShouldRejectOutOfRangePort(int port)
+    {
+        var handler = new CaptureHandler(_ => """{ "status": "ok" }""");
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Deny, Ports = [port] }
+        ]);
+
+        await act.Should().ThrowAsync<InvalidArgumentException>();
+    }
+
+    [Fact]
+    public async Task PatchRulesAsync_ShouldRejectDuplicatePorts()
+    {
+        var handler = new CaptureHandler(_ => """{ "status": "ok" }""");
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Deny, Ports = [443, 443] }
+        ]);
+
+        await act.Should().ThrowAsync<InvalidArgumentException>();
+    }
+
+    [Fact]
+    public async Task PatchRulesAsync_ShouldEnforce256PortCap()
+    {
+        var handler = new CaptureHandler(_ => """{ "status": "ok" }""");
+        var adapter = CreateAdapter(handler);
+
+        var tooMany = () => adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Deny, Ports = Enumerable.Range(1, 257).ToList() }
+        ]);
+        await tooMany.Should().ThrowAsync<InvalidArgumentException>();
+
+        await adapter.PatchRulesAsync([
+            new NetworkRule { Action = NetworkRuleAction.Deny, Ports = Enumerable.Range(1, 256).ToList() }
+        ]);
+        handler.Requests.Should().ContainSingle();
     }
 
     private static EgressAdapter CreateAdapter(

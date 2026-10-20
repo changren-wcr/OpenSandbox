@@ -183,9 +183,24 @@ Current limitations:
 
 - **TCP only.** UDP port scoping is not supported.
 - **Max 256 ports per rule.** Split a larger set across multiple rules.
+- **Valid port lists only.** Each port must be 1-65535, a list must not
+  contain duplicates, and `"ports": []` is rejected (omit `ports` instead).
+  The lifecycle server and the SDKs (except Go, which only documents the
+  limits) apply the same checks, so an invalid rule fails at the API call
+  instead of at sandbox startup.
+- **CIDR prefix-length notation only.** `10.0.0.0/8` is a CIDR target;
+  netmask notation such as `10.0.0.0/255.0.0.0` is not recognized as a CIDR
+  and is therefore treated as a domain (so combining it with `ports` is
+  rejected). Surrounding whitespace in `target` is trimmed before this check.
 - **No domain + ports combination.** Domain rules are evaluated at the DNS
   proxy layer, which has no port dimension; a rule that sets both a domain
   `target` and `ports` is rejected during policy validation.
+- **`PATCH /policy` merges by target *and* ports.** The merge key is the
+  `target` plus the sorted `ports` list, so rules with the same target but
+  different ports coexist. For example, patching
+  `{ "action": "deny", "target": "10.0.0.5", "ports": [22] }` onto a policy
+  that already has `{ "action": "allow", "target": "10.0.0.5" }` keeps both
+  rules; it only replaces an existing rule for `10.0.0.5` on exactly `[22]`.
 - **Not removable via `DELETE /policy`.** That endpoint removes rules by
   `target` string, and a port-only rule has none. Replace the whole policy
   with `POST`/`PUT` to drop a port-only rule.
